@@ -317,6 +317,46 @@ class IssuuDocumentV4:
         pages: list[IssuuPage]
         textInfo: IssuuTextInfo
 
+@dataclass
+class IssuuLicenseConfigV3:
+        customization_disable_reshare: bool = False
+        customization_disable_search: bool = False
+        customization_disable_share: bool = False
+        customization_remove_link_below: bool = False
+        customization_set_bg_color: bool = False
+        customization_set_bg_image: bool = False
+        customization_set_logo: bool = False
+        customization_show_my_other_publications: bool = False
+        download: bool = False
+        embed: bool = False
+        hide_ads_in_reader: bool = False
+        norelated: bool = False
+        norelatedmobile: bool = False
+        upload_limit_mb: int = None
+        upload_limit_page: int = None
+
+@dataclass
+class IssuuContentRating:
+        isAdsafe: bool = False
+        isSafe: bool = False
+        isReviewed: bool = False
+        isExplicit: bool = False
+
+@dataclass
+class IssuuReaderMetadataV3:
+        title: str
+        description: str
+        userDisplayName: str
+        access: str
+        downloadable: bool
+        originalFileSizeBytes: int
+        contentRating: IssuuContentRating
+
+@dataclass
+class IssuuReaderConfigV3:
+        licenses: IssuuLicenseConfigV3
+        metadata: IssuuReaderMetadataV3
+
 def type_from_json(t, v):
         ta = typing.get_args(t)
         t = typing.get_origin(t) or t
@@ -356,6 +396,10 @@ class IssuuFetcher:
                                 f.write(resp.content)
                 return resp
 
+        def _call(self, _method, *args, **kwargs):
+                url = f'https://api.issuu.com/call/{_method}/{"/".join(args)}'
+                return self.session.get(url, **kwargs)
+
         def _get_document(self, author: str, name: str) -> IssuuDocumentV4:
                 fns = ['reader3_4.json']
                 for fn in fns:
@@ -370,6 +414,16 @@ class IssuuFetcher:
                         else:
                                 raise ValueError(f'issuu document version unsupported: {reader["version"]}')
                         return document
+
+        def _get_reader_config(self, author: str, name: str) -> IssuuReaderConfigV3:
+                resp = self._call('backend-reader3/dynamic', author, name)
+                return type_from_json(IssuuReaderConfigV3, resp.json())
+
+        def _get_download_url(self, id: str) -> str | None:
+                resp = self._call('backend-reader3/download', id)
+                if resp.ok:
+                        return resp.json()['url']
+                return None
 
         def fetch(self, uri: str = None, author: str = None, name: str = None):
                 if not author or not name:
@@ -389,42 +443,56 @@ class IssuuFetcher:
 
                 print(f'>> Fetching {name} ({author})')
                 document = self._get_document(author, name)
-                self._get(name, fixup_uri(document.smartzoomUri))
-                if document.textInfo:
-                        self._get(name, fixup_uri(document.textInfo.uri))
 
-                pdf = fitz.open()
-                last_layer_uri = None
-                last_layer_i = None
-                for i, page in enumerate(document.pages, start=1):
-                        print(f'  Page {i}')
-                        page_image = self._get(name, fixup_uri(page.imageUri)).content
+                dl_url = self._get_download_url(document.publicationId)
+                pdf_data = None
+                if dl_url:
+                        print(f'  Found download URL, fetching: {dl_url}')
+                        pdf_data = requests.get(dl_url).content
 
-                        if page.layersInfo:
-                                last_layer_uri = page.layersInfo.uri
-                                last_layer_i = i
-                        elif last_layer_uri:
-                                last_layer_uri = last_layer_uri.replace(f'{last_layer_i}.bin', f'{i}.bin')
-                                last_layer_i = i
+                if pdf_data:
+                        print(f'>> Saving downloaded PDF')
+                        with open(os.path.join(self.output_dir, name + '.pdf'), 'wb') as f:
+                                f.write(pdf_data)
+                else:
+                        print(f'  Rendering...')
 
-                        layer_wire = None
-                        if last_layer_uri:
-                                layer_resp = self._get(name, fixup_uri(last_layer_uri))
-                                if layer_resp.ok:
-                                        layer_wire = parse_i_wire(BytesIO(layer_resp.content), len(layer_resp.content))
-                        
-                        if layer_wire:
-                                layer = type_from_wire(IssuuLayerInfo, layer_wire)
-                                print(f'    Rendering...')
-                                layer.render(pdf)
-                        else:
-                                print(f'    Using image...')
-                                pdf_page = pdf.new_page(i - 1, page.width, page.height)
-                                pdf_page.insert_image(rect=(0, 0, page.width, page.height), stream=page_image)
+                        self._get(name, fixup_uri(document.smartzoomUri))
+                        if document.textInfo:
+                                self._get(name, fixup_uri(document.textInfo.uri))
 
-                print('>> Saving PDF')
-                pdf.save(os.path.join(self.output_dir, name + '.pdf'),
-                        garbage=4, clean=True, deflate=True, deflate_images=True, deflate_fonts=True, linear=True)
+                        pdf = fitz.open()
+                        last_layer_uri = None
+                        last_layer_i = None
+                        for i, page in enumerate(document.pages, start=1):
+                                print(f'  Fetching page {i}')
+                                page_image = self._get(name, fixup_uri(page.imageUri)).content
+
+                                if page.layersInfo:
+                                        last_layer_uri = page.layersInfo.uri
+                                        last_layer_i = i
+                                elif last_layer_uri:
+                                        last_layer_uri = last_layer_uri.replace(f'{last_layer_i}.bin', f'{i}.bin')
+                                        last_layer_i = i
+
+                                layer_wire = None
+                                if last_layer_uri:
+                                        layer_resp = self._get(name, fixup_uri(last_layer_uri))
+                                        if layer_resp.ok:
+                                                layer_wire = parse_i_wire(BytesIO(layer_resp.content), len(layer_resp.content))
+
+                                if layer_wire:
+                                        layer = type_from_wire(IssuuLayerInfo, layer_wire)
+                                        print(f'    Rendering...')
+                                        layer.render(pdf)
+                                else:
+                                        print(f'    Using image...')
+                                        pdf_page = pdf.new_page(i - 1, page.width, page.height)
+                                        pdf_page.insert_image(rect=(0, 0, page.width, page.height), stream=page_image)
+
+                        print('>> Saving rendered PDF')
+                        pdf.save(os.path.join(self.output_dir, name + '.pdf'),
+                                garbage=4, clean=True, deflate=True, deflate_images=True, deflate_fonts=True, linear=True)
 
 if __name__ == '__main__':
         import os
