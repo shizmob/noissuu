@@ -167,6 +167,9 @@ class IssuuLayerInfo:
                                 m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
                                 m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
                         )
+                def fitz_matrix(s):
+                        # convert to mupdf column-major
+                        return fitz.Matrix(s[0], s[2], s[1], s[3], s[4], s[5])
 
                 for l in self.layers:
                         if l.image:
@@ -196,7 +199,7 @@ class IssuuLayerInfo:
                                         point = translate_point((origin_x[i], origin_y[i]), matrix)
                                         morph = multiply_matrix(scale_matrix(scale[i]), smatrix)
                                         page.insert_text(point, x,
-                                                fontname=fontname, fontsize=text.size, morph=(fitz.Point(point), fitz.Matrix(morph)),
+                                                fontname=fontname, fontsize=text.size, morph=(fitz.Point(point), fitz_matrix(morph)),
                                                 fill=color, fill_opacity=opacity)
                         if l.rect:
                                 rect = l.rect
