@@ -110,6 +110,53 @@ class IssuuImage:
         def __repr__(self) -> str:
                 return self.__class__.__name__
 
+def fcolor(a):
+        opacity = (a >> 24) / 0xff
+        color = (
+                ((a >> 16) & 0xff) / 0xff,
+                ((a >> 8) & 0xff) / 0xff,
+                (a & 0xff) / 0xff,
+        )
+        return color, opacity
+
+def farr(a):
+        return [struct.unpack('<f', a[i:i + 4])[0] for i in range(0, len(a), 4)]
+
+# Note: this is a transformation matrix like in https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/transform#syntax
+def matrix():
+        return (1, 0, 0, 1, 0, 0)
+def multiply_matrix(m1, m2):
+        # we calculate:
+        # [ a c e ] [ A C E ]   [ aA + cB    aC + cD    aE + cF + e ]
+        # [ b d f ] [ B D F ] = [ bA + dB    bC + dD    bE + cF + f ]
+        # [ 0 0 1 ] [ 0 0 1 ]   [ 0          0          1           ]
+        return (
+                m1[0] * m2[0] + m1[2] * m2[1],
+                m1[1] * m2[0] + m1[3] * m2[1],
+                m1[0] * m2[2] + m1[2] * m2[3],
+                m1[1] * m2[2] + m1[3] * m2[3],
+                m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+                m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+        )
+def scale_matrix(m, s):
+        return multiply_matrix(m, (s, 0, 0, s, 0, 0))
+def translate_matrix(m, x, y):
+        return (m[0], m[1], m[2], m[3], m[4] + x, m[5] + y)
+def untranslate_matrix(m):
+        return (m[0], m[1], m[2], m[3], 0, 0)
+def translate_point(p, m):
+        # we calculate:
+        # [ a c e ] [ x ]    [ ax + cy + e ]
+        # [ b d f ] [ y ] =  [ bx + dy + f ]
+        # [ 0 0 1 ] [ 1 ]    [ 1           ]
+        return (
+                m[0] * p[0] + m[2] * p[1] + m[4],
+                m[1] * p[0] + m[3] * p[1] + m[5],
+        )
+def fitz_matrix(s):
+        # convert to mupdf column-major
+        return fitz.Matrix(s[0], s[2], s[1], s[3], s[4], s[5])
+
 @dataclass
 class IssuuLayerInfo:
         page_number: int
@@ -128,49 +175,6 @@ class IssuuLayerInfo:
                 page = pdf.new_page(self.page_number - 1, self.width, self.height)
                 fonts = {}
 
-                def fcolor(a):
-                        opacity = (a >> 24) / 0xff
-                        color = (
-                                ((a >> 16) & 0xff) / 0xff,
-                                ((a >> 8) & 0xff) / 0xff,
-                                (a & 0xff) / 0xff,
-                        )
-                        return color, opacity
-
-                def farr(a):
-                        return [struct.unpack('<f', a[i:i + 4])[0] for i in range(0, len(a), 4)]
-
-                # Note: this is a transformation matrix like in https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/transform#syntax
-                def scale_matrix(s):
-                        return (s, 0, 0, s, 0, 0)
-                def untranslate_matrix(m):
-                        return (m[0], m[1], m[2], m[3], 0, 0)
-                def translate_point(p, m):
-                        # we calculate:
-                        # [ a c e ] [ x ]    [ ax + cy + e ]
-                        # [ b d f ] [ y ] =  [ bx + dy + f ]
-                        # [ 0 0 1 ] [ 1 ]    [ 1           ]
-                        return (
-                                m[0] * p[0] + m[2] * p[1] + m[4],
-                                m[1] * p[0] + m[3] * p[1] + m[5],
-                        )
-                def multiply_matrix(m1, m2):
-                        # we calculate:
-                        # [ a c e ] [ A C E ]   [ aA + cB    aC + cD    aE + cF + e ]
-                        # [ b d f ] [ B D F ] = [ bA + dB    bC + dD    bE + cF + f ]
-                        # [ 0 0 1 ] [ 0 0 1 ]   [ 0          0          1           ]
-                        return (
-                                m1[0] * m2[0] + m1[2] * m2[1],
-                                m1[1] * m2[0] + m1[3] * m2[1],
-                                m1[0] * m2[2] + m1[2] * m2[3],
-                                m1[1] * m2[2] + m1[3] * m2[3],
-                                m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
-                                m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
-                        )
-                def fitz_matrix(s):
-                        # convert to mupdf column-major
-                        return fitz.Matrix(s[0], s[2], s[1], s[3], s[4], s[5])
-
                 for l in self.layers:
                         if l.image:
                                 image = self.images[l.image.image_id]
@@ -183,8 +187,8 @@ class IssuuLayerInfo:
                         if l.text:
                                 text = l.text
 
-                                matrix = farr(text.matrix)
-                                smatrix = untranslate_matrix(matrix)
+                                tmatrix = farr(text.matrix)
+                                smatrix = untranslate_matrix(tmatrix)
                                 origin_x = farr(text.origin_x)
                                 origin_y = farr(text.origin_y)
                                 scale = farr(text.scale)
@@ -196,8 +200,8 @@ class IssuuLayerInfo:
 
                                 color, opacity = fcolor(text.color)
                                 for i, x in enumerate(text.text):
-                                        point = translate_point((origin_x[i], origin_y[i]), matrix)
-                                        morph = multiply_matrix(scale_matrix(scale[i]), smatrix)
+                                        point = translate_point((origin_x[i], origin_y[i]), tmatrix)
+                                        morph = scale_matrix(smatrix, scale[i])
                                         page.insert_text(point, x,
                                                 fontname=fontname, fontsize=text.size, morph=(fitz.Point(point), fitz_matrix(morph)),
                                                 fill=color, fill_opacity=opacity)
